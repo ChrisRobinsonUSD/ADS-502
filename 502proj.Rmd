@@ -1,0 +1,321 @@
+---
+title: "Predicting Rainfall in Australian Cities"
+author: "Jessica Eloy, Chris Robinson, Andrew Zazueta"
+date: "4/4/2021"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Background and Purpose
+
+The data set being used for this project contains data on the weather in different cities in Australia, which was found on a Kaggle competition page. There are 23 variables within the data set and each row is a different date corresponding to a certain location. The data set has 10 years of weather information, ranging from the minimum and maximum temperature of the day to the pressure and the humidity. In total, there are 145,460 rows (not including the header) and 23 columns. 
+
+The purpose of this project is to predict the target variable 'RainTomorrow' in the data set 'weatherAUS' using classification models. 'RainTomorrow' is a binary feature taking the values 'Yes' or 'No'. The rainfall must be more than 1mm for the 'RainToday' (another binary feature in the data which states if rain happened on a specific day or not) and 'RainTomorrow' variables to be 'Yes'. The objective is to use different data cleaning methods, data prepping methods, and predictive modeling strategies learned this semester and apply them to this data set.
+
+## Obtaining Data and Setting up Libraries
+
+```{r, message = FALSE, warning = FALSE}
+setwd("C:/Users/mzazu/OneDrive/Documents/USD papers/502/weatherAUS.csv")
+library("tidyverse")
+library("randomForest")
+library("lubridate")
+library("e1071")
+library("C50")
+library("rpart")
+weatherAUS <- read_csv("weatherAUS.csv")
+```
+
+## Cleaning and Preporation Phase
+
+### Part 1: Exploratory Data Analysis and and Handling Missing Values
+
+The first step is to explore the data to see if there are any missing values that need to be handled. Also, checking different features to see if they are needed in the prediction is necessary to reduce the dimensionality. 
+
+```{r}
+# Evaporation values are missing from 98.7%  of the data set and Sunshine values 
+# are missing from 98.2% of the data set, so they will be removed
+
+length(which(is.na(weatherAUS$Evaporation))) / dim(weatherAUS)[1]
+length(which(is.na(weatherAUS$Sunshine))) / dim(weatherAUS)[1]
+
+weatherAUS <- weatherAUS %>%
+  select(-c(Evaporation, Sunshine))
+
+# To reduce the dimensionality of the data set, the features which contain 
+# information on wind direction will be removed. This is because we will be 
+# separating the data by location. Since we will only be looking at one location 
+# at a time, the direction of the wind would not influence on the "RainTomorrow" 
+# feature. The wind direction could have an influence if we were comparing two 
+# cities in close proximity with on another. 
+
+weatherAUS <- weatherAUS %>%
+  select(-c(WindGustDir, WindDir9am, WindDir3pm))
+
+# When the feature "RainToday" contains an NA, a lot of other features in the 
+# data set also have missing values. For this reason, the simplest solution is 
+# to delete these rows to avoid fudging data. 
+
+weatherAUS <- weatherAUS[complete.cases(weatherAUS$RainToday),]
+
+# The feature "RainTomorrow" is our response variable, so any missing value from 
+# this column cannot be replaced. 
+
+weatherAUS <- weatherAUS[complete.cases(weatherAUS$RainTomorrow),]
+
+# Making a data frame for different cities
+
+weatherSydney <- weatherAUS %>%
+  filter(Location == "Sydney")
+
+weatherMelbourne <- weatherAUS %>%
+  filter(Location == "Melbourne")
+
+weatherPerth <- weatherAUS %>%
+  filter(Location == "Perth")
+
+# Unlike other locations, Sydney is missing a large portion of the values (31%) 
+# in the "WindGustSpeed" feature, so it will be removed.
+
+length(which(is.na(weatherSydney$WindGustSpeed) == TRUE)) / dim(weatherSydney)[1]
+
+weatherSydney <- weatherSydney %>%
+  select(-c(WindGustSpeed))
+
+# The rest of the missing values will be replaced with the average of those 
+# values during a certain week. For example, if a "MinTemp" value is missing, 
+# the data from 3 days prior and 3 days after will be added together and then 
+# divided by 6 to find the average "MinTemp." This step is performed now and not 
+# earlier because of how large the entire data set is. There might be instances 
+# where we divide by 6 even though the sum of six numbers was not found (due to 
+# NA's being close together). This is alright because we are already making 
+# assumptions on what number should be filling the NA. 
+
+NA_replace <- function(df) {
+  for(j in 1:ncol(df)){
+    for(i in 1:nrow(df)){
+      if(is.na(df[i,j]) == TRUE && i > 3){
+        avg <- sum(df[(i-3):(i+3),j], na.rm = TRUE) / 6
+        df[i,j] <- avg
+      }
+    }
+  }
+  return(df)
+}
+
+weatherSydney <- NA_replace(weatherSydney)
+weatherMelbourne <- NA_replace(weatherMelbourne)
+weatherPerth <- NA_replace(weatherPerth)
+```
+
+### Part 2: Making training and test sets
+
+Due to the data set being large, we will want to have more records in the training set (75-90 percent of original data). 
+
+```{r}
+# setting seed
+
+set.seed(7)
+
+# Weather Melbourne
+
+# identify how many records
+
+MEL <- dim(weatherMelbourne)[1]
+
+# determine which records are in training set 
+
+train_ind <- runif(MEL) < 0.75
+
+# create training and test sets
+
+MELtrain <- weatherMelbourne[ train_ind, ]
+MELtest <- weatherMelbourne[ !train_ind, ]
+
+# Weather Sydney
+
+SYD <- dim(weatherSydney)[1]
+train_ind <- runif(SYD) < 0.75
+SYDtrain <- weatherSydney[ train_ind, ]
+SYDtest <- weatherSydney[ !train_ind, ]
+
+# Weather Perth
+
+PER <- dim(weatherPerth)[1]
+train_ind <- runif(PER) < 0.75
+PERtrain <- weatherPerth[ train_ind, ]
+PERtest <- weatherPerth[ !train_ind, ]
+```
+
+### Part 3: Checking Class Balance
+
+The last step in the data preparation phase is making sure classes are not too imbalanced for our modeling. 
+
+```{r}
+# RainToday and RainTomorrow Yes and No counts
+
+t1 <- table(weatherMelbourne$RainToday)
+t2 <- table(weatherSydney$RainToday)
+t3 <- table(weatherPerth$RainToday)
+t4 <- table(weatherMelbourne$RainTomorrow)
+t5 <- table(weatherSydney$RainTomorrow)
+t6 <- table(weatherPerth$RainTomorrow)
+
+t7 <- rbind(t1, round(prop.table(t1), 2), t2, round(prop.table(t2), 2), t3, 
+            round(prop.table(t3), 2), t4, round(prop.table(t4), 2), t5, 
+            round(prop.table(t5), 2), t6, round(prop.table(t6), 2))
+rownames(t7) <- c("Melbourne Rain Today", " ","Sydney Rain Today", " ", 
+                  "Perth Rain Today", " ", "Melbourne Rain Tomorrow", " ", 
+                  "Sydney Rain Tomorrow", " ", "Perth Rain Tomorrow", " ")
+t7
+```
+
+Taking a look at the values, 20-26% of the values are 'Yes' in each data frame, so no re-balancing is needed.
+
+## Choosing Data Mining Task
+
+As stated in the beginning of the paper, the purpose of this project is to predict the 'RainTomorrow' future. Since this is a categorical/logical variable, machine learning algorithms like decision trees, C5.0, Naive Bayes, CART, neural networks, etc. can be used. The three algorithms that were chosen to predict our response variable are Random Forests, Naive Bayes, and C5.0. These will be applied to the three data frames we made to compare the effectiveness of each one and to examine which one yields the most accurate results. In total, 9 models will be made.  
+
+## Applying Algorithms to Find Best Model
+
+Each model made will have a contingency table made with it. 
+
+```{r}
+# Sydney Models
+
+# Setting up data set for model usage
+
+SYDtrain$RainTomorrow <- factor(SYDtrain$RainTomorrow)
+SYDtest$RainTomorrow <- factor(SYDtest$RainTomorrow)
+
+# Random Forest
+
+rf01 <- randomForest(formula = RainTomorrow ~ Rainfall + Humidity3pm 
+                     + Cloud3pm, data = SYDtrain, ntree = 100, type = "classification")
+
+
+
+ypred <- predict(rf01, SYDtest)
+
+t_n <- table(SYDtest$RainTomorrow, ypred)
+row.names(t_n) <- c("Actual: no", "Actual: yes")
+colnames(t_n) <- c("Predicted: no", "Predicted: yes")
+t_n <- addmargins(A = t_n, FUN = list(Total = sum), quiet = TRUE) 
+t_n
+
+# Naive Bayes
+
+nb01 <- naiveBayes(formula = RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm,
+                   data = SYDtrain)
+
+ypred2 <- predict(object = nb01, newdata = SYDtest)
+
+t_n2 <- table(SYDtest$RainTomorrow, ypred2)
+row.names(t_n2) <- c("Actual: no", "Actual: yes")
+colnames(t_n2) <- c("Predicted: no", "Predicted: yes")
+t_n2 <- addmargins(A = t_n2, FUN = list(Total = sum), quiet = TRUE) 
+t_n2
+
+# C5.0
+
+C5 <- C5.0(RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, data = SYDtrain)
+
+ypred3 <- predict(object = C5, newdata = SYDtest)
+
+t_n3 <- table(SYDtest$RainTomorrow, ypred3)
+row.names(t_n3) <- c("Actual: no", "Actual: yes")
+colnames(t_n3) <- c("Predicted: no", "Predicted: yes")
+t_n3 <- addmargins(A = t_n3, FUN = list(Total = sum), quiet = TRUE) 
+t_n3
+
+# Perth Models
+
+PERtrain$RainTomorrow <- factor(PERtrain$RainTomorrow)
+PERtest$RainTomorrow <- factor(PERtest$RainTomorrow)
+
+# Random Forest
+
+rf02 <- randomForest(formula = RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, 
+                     data = PERtrain, ntree = 100, type = "classification")
+
+ypred4 <- predict(rf02, PERtest)
+
+t_n4 <- table(PERtest$RainTomorrow, ypred4)
+row.names(t_n4) <- c("Actual: no", "Actual: yes")
+colnames(t_n4) <- c("Predicted: no", "Predicted: yes")
+t_n4 <- addmargins(A = t_n4, FUN = list(Total = sum), quiet = TRUE) 
+t_n4
+
+# Naive Bayes
+
+nb02 <- naiveBayes(formula = RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, 
+                   data = PERtrain)
+
+ypred5 <- predict(object = nb02, newdata = PERtest)
+
+t_n5 <- table(PERtest$RainTomorrow, ypred5)
+row.names(t_n5) <- c("Actual: no", "Actual: yes")
+colnames(t_n5) <- c("Predicted: no", "Predicted: yes")
+t_n5 <- addmargins(A = t_n5, FUN = list(Total = sum), quiet = TRUE) 
+t_n5
+
+# C5.0
+
+C5_PERTH <- C5.0(RainTomorrow ~ Humidity3pm, data = PERtrain)
+
+ypred6 <- predict(object = C5_PERTH, newdata = PERtest)
+
+t_n6 <- table(PERtest$RainTomorrow, ypred6)
+row.names(t_n6) <- c("Actual: no", "Actual: yes")
+colnames(t_n6) <- c("Predicted: no", "Predicted: yes")
+t_n6 <- addmargins(A = t_n6, FUN = list(Total = sum), quiet = TRUE) 
+t_n6
+
+# Melbourne Models
+
+MELtrain$RainTomorrow <- factor(MELtrain$RainTomorrow)
+MELtest$RainTomorrow <- factor(MELtest$RainTomorrow)
+
+# Random Forest
+
+rf03 <- randomForest(formula = RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, 
+                     data = MELtrain, ntree = 100, type = "classification")
+
+ypred7 <- predict(rf03, MELtest)
+
+t_n7 <- table(MELtest$RainTomorrow, ypred7)
+row.names(t_n7) <- c("Actual: no", "Actual: yes")
+colnames(t_n7) <- c("Predicted: no", "Predicted: yes")
+t_n7 <- addmargins(A = t_n7, FUN = list(Total = sum), quiet = TRUE) 
+t_n7
+
+# Naive Bayes
+
+nb03 <- naiveBayes(formula = RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, 
+                   data = MELtrain)
+
+ypred8 <- predict(object = nb03, newdata = MELtest)
+
+t_n8 <- table(MELtest$RainTomorrow, ypred8)
+
+row.names(t_n8) <- c("Actual: no", "Actual: yes")
+colnames(t_n8) <- c("Predicted: no", "Predicted: yes")
+t_n8 <- addmargins(A = t_n8, FUN = list(Total = sum), quiet = TRUE) 
+t_n8
+
+# C5.0
+
+C5_MEL <- C5.0(RainTomorrow ~ Rainfall + Humidity3pm + Cloud3pm, data = MELtrain)
+
+ypred9 <- predict(object = C5_MEL, newdata = MELtest)
+
+t_n9 <- table(MELtest$RainTomorrow, ypred9)
+row.names(t_n9) <- c("Actual: no", "Actual: yes")
+colnames(t_n9) <- c("Predicted: no", "Predicted: yes")
+t_n9 <- addmargins(A = t_n9, FUN = list(Total = sum), quiet = TRUE) 
+t_n9
+```
+
+## Evaluation of Results
+
+...
